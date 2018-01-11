@@ -1,0 +1,719 @@
+<?php
+
+/**
+ * For Live Fix below
+ * 1. Currency code, can only be SEK and EURO, so remove NOK check
+ * 2. Option set should have first and last name
+ * 
+ * 
+ * [callbacks] => Array
+  (
+  [settings_form] => payson_api_settings_form
+  [submit_form] => payson_api_submit_form
+  [submit_form_validate] => payson_api_submit_form_validate
+  [submit_form_submit] => payson_api_submit_form_submit
+  [redirect_form] => payson_api_redirect_form
+  [redirect_form_back] => payson_api_redirect_form_back
+  [redirect_form_validate] => payson_api_redirect_form_validate
+  [redirect_form_submit] => payson_api_redirect_form_submit
+  )
+ */
+/**
+ * @file
+ * Implements Payson payment services for use with Drupal Commerce.
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function payson_api_menu() {
+    $items = array();
+
+    // Define an always accessible path to receive IPNs.
+    $items['payson_api/ipn'] = array(
+        'page callback' => 'payson_api_process_ipn',
+        'page arguments' => array(),
+        'access callback' => TRUE,
+        'type' => MENU_CALLBACK,
+    );
+
+    // Define an additional IPN path that is payment method / instance specific.
+    $items['payson_api/ipn/%commerce_payment_method_instance'] = array(
+        'page callback' => 'payson_api_process_ipn',
+        'page arguments' => array(2),
+        'access callback' => TRUE,
+        'type' => MENU_CALLBACK,
+    );
+
+    return $items;
+}
+
+/**
+ * Implements hook_commerce_payment_method_info().
+ */
+function payson_api_commerce_payment_method_info() {
+    $payment_methods = array();
+
+    $payment_methods['payson_api_pay'] = array(
+        'base' => 'payson_api',
+        'title' => t('Payson API (Visa, Mastercard, Internet Banking)'),
+        'short_title' => t('Payson'),
+        'display_title' => t('Payson API (Visa, Mastercard, Internet Banking)'),
+        'description' => t('Payment payments using API.'),
+        'terminal' => FALSE,
+        'offsite' => TRUE,
+        'offsite_autoredirect' => TRUE, // Auto submit
+    );
+
+    return $payment_methods;
+}
+
+/**
+ * Payment method callback: settings form.
+ */
+function payson_api_settings_form($settings = NULL) {
+    $form = array();
+
+    // Merge default settings into the stored settings array.
+    $settings = (array) $settings + array(
+        'email' => '',
+        'first_name' => '',
+        'last_name' => '',
+        'agentid' => '',
+        'md5' => '',
+        'currency_code' => 'SEK',
+        'server' => 'testApi',
+        'guarantee' => 'OPTIONAL',
+        'test_agentid' => 4,
+        'test_md5' => '2acab30d-fe50-426f-90d7-8c60a7eb31d4',
+        'test_email' => 'testagent-1@payson.se',
+        'ipn_logging' => 'notification',
+    );
+
+    $form['email'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Primary Payson e-mail address'),
+        '#description' => t('The e-mail address you use for the Payson account you want to receive payments.'),
+        '#default_value' => $settings['email'],
+        '#required' => TRUE,
+        '#element_validate' => array('payson_api_email_validate'),
+        '#size' => 30,
+    );
+
+    $form['first_name'] = array(
+        '#type' => 'textfield',
+        '#title' => t('First Name'),
+        '#description' => t('Receiver First Name'),
+        '#default_value' => $settings['first_name'],
+        '#required' => TRUE,
+        '#maxlength' => 20,
+        '#size' => 30,
+    );
+
+    $form['last_name'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Last Name'),
+        '#description' => t('Receiver Last Name'),
+        '#default_value' => $settings['last_name'],
+        '#required' => TRUE,
+        '#maxlength' => 20,
+        '#size' => 30,
+    );
+
+    $form['agentid'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Agent-ID'),
+        '#description' => t('Your Payson Agent-ID.'),
+        '#default_value' => $settings['agentid'],
+        '#required' => TRUE,
+        '#maxlength' => 5,
+        '#size' => 30,
+    );
+
+    $form['md5'] = array(
+        '#type' => 'textfield',
+        '#title' => t('MD5-Key'),
+        '#description' => t('Your Payson MD5-key.'),
+        '#default_value' => $settings['md5'],
+        '#required' => TRUE,
+        '#maxlength' => 36,
+        '#size' => 30,
+    );
+
+    $form['currency_code'] = array(
+        '#type' => 'select',
+        '#title' => t('Currency code'),
+        '#description' => t('Transactions can only be processed in one of the listed currencies.'),
+        '#options' => array(
+            'EUR' => 'EUR',
+            'SEK' => 'SEK',
+        ),
+        '#default_value' => $settings['currency_code'],
+    );
+
+    $form['guarantee'] = array(
+        '#type' => 'radios',
+        '#title' => t('Payson guarantee'),
+        '#description' => l(t('Read more about Payson Guarantee here'), 'https://www.payson.se/betals%C3%A4tt/paysongaranti', array('attributes' => array('target' => '_blank'))),
+        '#options' => array(
+            'NO' => t('Do not offer Payson guarantee'),
+            'REQUIRED' => t('Offer Payson guarantee'),
+            'OPTIONAL' => t('Optional Payson guarantee'),
+        ),
+        '#default_value' => $settings['guarantee'],
+        '#size' => 30,
+    );
+
+    $form['server'] = array(
+        '#type' => 'radios',
+        '#title' => t('Payson transaction url'),
+        '#options' => array(
+            'testApi' => t('Test API - Used for testing purposes'),
+            'liveAPI' => t('Merchant - Used for live transactions'),
+        ),
+        '#default_value' => $settings['server'],
+        '#size' => 30,
+    );
+
+    $form['test_email'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Payson Test e-mail address'),
+        '#description' => t('The e-mail address you use for the Payson account you want to receive payments.'),
+        '#default_value' => $settings['test_email'],
+        '#required' => FALSE,
+        '#element_validate' => array('payson_api_email_validate'),
+        '#size' => 30,
+    );
+
+    $form['test_agentid'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Test Agent-ID'),
+        '#description' => t('Test Payson Agent-ID. Default 3.'),
+        '#default_value' => $settings['test_agentid'],
+        '#required' => FALSE,
+        '#maxlength' => 5,
+        '#size' => 30,
+    );
+
+    $form['test_md5'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Test MD5-Key'),
+        '#description' => t('Test Payson MD5-key. Default 54e5eb76-3888-4673-a5ba-be2f4187c3d5'),
+        '#default_value' => $settings['test_md5'],
+        '#required' => FALSE,
+        '#maxlength' => 36,
+        '#size' => 30,
+    );
+
+    $form['ipn_logging'] = array(
+        '#type' => 'radios',
+        '#title' => t('Instant Payment Notification (IPN) logging'),
+        '#options' => array(
+            'notification' => t('Log notifications during IPN validation and processing.'),
+            'full_ipn' => t('Log notifications with the full IPN during validation and processing (used for debugging).'),
+        ),
+        '#default_value' => $settings['ipn_logging'],
+        '#size' => 30,
+    );
+
+    return $form;
+}
+
+/**
+ * Validates the email address form item.
+ */
+function payson_api_email_validate($element, &$form_state, $form) {
+    if (!valid_email_address($element['#value'])) {
+        form_error($element, t('Please provide a valid email address.'));
+    }
+}
+
+/**
+ * Payment method callback: checkout form.
+ */
+function payson_api_submit_form($payment_method, $pane_values, $checkout_pane, $order) {
+    $form = array();
+
+    $form['payson-details-icon'] = array(
+        '#markup' => '<img alt="' . t("Payment Method") . '" src="https://www.payson.se/sites/all/files/images/external/payson150x55.png" class="payment-logo-image">',
+        '#prefix' => '<div class="payment-logo">',
+        '#suffix' => '</div>',
+    );
+
+    $form['pason-details-info'] = array(
+        '#markup' => t('You will be redirected to the payment site and will return back here when payment completed.'),
+        '#prefix' => '<div class="payment-details clearfix">',
+        '#suffix' => '</div>',
+    );
+    return $form;
+}
+
+/**
+ * Payment method callback: redirect form
+ */
+function payson_api_redirect_form($form, &$form_state, $order, $payment_method) {
+
+    $wrapper = entity_metadata_wrapper('commerce_order', $order);
+    $currency_code = $wrapper->commerce_order_total->currency_code->value();
+
+    if ($currency_code !== 'EUR' && $currency_code !== 'SEK') {
+        drupal_set_message(t('Payson can only process orders in EUR or SEK. Please contact a site administrator to solve this issue.'), 'error');
+        return drupal_goto('checkout/' . $order->order_number . '/payment/back/' . $order->data['payment_redirect_key']);
+    }
+
+    if (!$payment_method['settings'] || !$payment_method['settings']['server']) {
+        drupal_set_message(t('Please configure Payson module before usage.'), 'error');
+        return drupal_goto('checkout/' . $order->order_number . '/payment/back/' . $order->data['payment_redirect_key']);
+    }
+
+
+    $settings = array(
+        'cancel_url' => url('checkout/' . $order->order_id . '/payment/back/' . $order->data['payment_redirect_key'], array('absolute' => TRUE)),
+        'return_url' => url('checkout/' . $order->order_id . '/payment/return/' . $order->data['payment_redirect_key'], array('absolute' => TRUE)),
+        'payment_method' => $payment_method['instance_id'],
+        'server' => $payment_method['settings']['server'],
+        'test_email' => $payment_method['settings']['test_email'],
+        'test_agentid' => $payment_method['settings']['test_agentid'],
+        'test_md5' => $payment_method['settings']['test_md5'],
+        'ipn_logging' => $payment_method['settings']['ipn_logging'],
+        'primary_email' => $payment_method['settings']['email'],
+        'primary_first_name' => $payment_method['settings']['first_name'],
+        'primary_last_name' => $payment_method['settings']['last_name'],
+        'primary_account_id' => $payment_method['settings']['agentid'],
+        'primary_account_key' => $payment_method['settings']['md5'],
+        'currency_code' => $currency_code,
+    );
+
+    return payson_api_order_form($form, $form_state, $order, $settings);
+}
+
+/**
+ * Builds a Payson Agent Integration payment form from an order object.
+ *
+ * @param $order
+ *   The fully loaded order being paid for.
+ * @param $settings
+ *   An array of settings used to build out the form, including:
+ *   - email: The email address of the set up Payson Agent Integration
+ *   - agentid: The 5 digit Payson Agent ID of the set up Payson Agent Integration
+ *   - md5: The md5 hash string of the set up Payson Agent Integration
+ *   - currency_code: the Payson currency code to use for this payment
+ *   - server: Which url to direct the request to
+ *   - guarantee: Whether Payson Guarantee should be offered or not
+ *   - cancel_return: the URL Payson should send the user to on cancellation
+ *   - return: the URL Payson should send the user to on successful payment
+ *
+ * @return
+ *   A renderable form array.
+ */
+function payson_api_order_form($form, &$form_state, $order, $settings) {
+    // load order object and read cost information
+    $wrapper = entity_metadata_wrapper('commerce_order', $order);
+    $getShippingInfo = $wrapper->commerce_customer_billing->commerce_customer_address->value();
+
+    if (empty($getShippingInfo['first_name'])) {
+        $name_parts = explode(' ', $getShippingInfo['name_line']);
+        $getShippingInfo['first_name'] = array_shift($name_parts);
+        $getShippingInfo['last_name'] = implode(' ', $name_parts);
+    }
+
+    if (empty($getShippingInfo['administrative_area'])) {
+        $getShippingInfo['administrative_area'] = $getShippingInfo['locality'];
+    }
+
+    $shipping = array(
+        'country' => $getShippingInfo['country'],
+        'state' => substr($getShippingInfo['administrative_area'], 0, 40),
+        'city' => substr($getShippingInfo['locality'], 0, 40),
+        'address' => substr($getShippingInfo['thoroughfare'], 0, 60),
+        'zip' => substr($getShippingInfo['postal_code'], 0, 20),
+        'first_name' => substr($getShippingInfo['first_name'], 0, 50),
+        'last_name' => substr($getShippingInfo['last_name'], 0, 50),
+    );
+
+
+
+    $currency_code = $settings['currency_code'];
+
+
+    $amount = $wrapper->commerce_order_total->amount->value();
+
+    $settings += array('payment_method' => '');
+
+
+    $cost = paypal_api_price_format($amount, $currency_code);
+
+    $order_description = t('Order @order_number at @store', array('@order_number' => $order->order_number, '@store' => variable_get('site_name', url('<front>', array('absolute' => TRUE)))));
+
+    // Which Payson API library to use? test or production server
+    if ($settings['server'] == 'liveAPI') {
+        require_once 'lib/paysonapi.php';
+        $settings['email'] = $settings['primary_email'];
+        $settings['account_id'] = $settings['primary_account_id'];
+        $settings['account_key'] = $settings['primary_account_key'];
+    } else {
+        require_once 'lib/paysonapiTest.php';
+        $settings['email'] = $settings['test_email'];
+        $settings['account_id'] = $settings['test_agentid'];
+        $settings['account_key'] = $settings['test_md5'];
+    }
+
+    // Every interaction with Payson goes through the PaysonApi object below
+    $credentials = new PaysonCredentials($settings['account_id'], $settings['account_key']);
+    $api = new PaysonApi($credentials);
+
+    // URLs to which Payson sends the user depending on the success of the payment
+    $returnUrl = $settings['return_url'];
+    $cancelUrl = $settings['cancel_url'];
+
+    // URL to which Payson issues the IPN
+    $ipnUrl = payson_api_ipn_url($settings['payment_method']);
+    $primaryReceiver = new Receiver(
+            $settings['email'], $cost, $settings['primary_first_name'], $settings['primary_last_name'], 'true'
+    );
+    $receivers = array($primaryReceiver);
+
+
+
+    $sender = new Sender($order->mail, $shipping['first_name']? : '-', $shipping['last_name']? : '-');
+    $payData = new PayData($returnUrl, $cancelUrl, $ipnUrl, $order_description, $sender, $receivers);
+
+    //Set the list of products
+    $line_items = $order->commerce_line_items[LANGUAGE_NONE];
+    foreach ($line_items AS $item) {
+        $line_item_id[] = $item['line_item_id'];
+    }
+
+    $line_item_loaded = commerce_line_item_load_multiple($line_item_id);
+    $orderItems = array();
+    foreach ($line_item_loaded as $line_item) {
+        $commerce_product_loaded = null;
+        if (isset($line_item->commerce_product)) {
+            $commerce_product_id = $line_item->commerce_product[LANGUAGE_NONE][0]['product_id'];
+            $commerce_product_loaded = commerce_product_load($commerce_product_id);
+        }
+
+        $tax = 0;
+
+        try {
+            if (isset($line_item->commerce_unit_price)) {
+                $taxObj = commerce_tax_components($line_item->commerce_unit_price[LANGUAGE_NONE][0]['data']['components']);
+                if (isset($taxObj[0])) {
+                    $tax = $taxObj[0]['price']['data']['tax_rate']['rate'];
+                }
+            }
+        } catch (Exception $ex) {
+            // No xat rate if failed to load tax structure tree
+        }
+
+        $amount = $line_item->commerce_unit_price[LANGUAGE_NONE][0]['amount'];
+        $cost = paypal_api_price_format($amount / (1 + $tax), $currency_code);
+
+        $orderItems[] = new OrderItem(
+                $commerce_product_loaded ? $commerce_product_loaded->title? : "-"  : "-", $cost, $line_item->quantity, $tax, $commerce_product_loaded ? $commerce_product_loaded->sku? : "-"  : "-"
+        );
+    }
+
+    $payData->setOrderItems($orderItems);
+
+
+
+    //Set the payment method
+    $constraints = array(FundingConstraint::CREDITCARD, FundingConstraint::BANK); //CREDITCARD, BANK, INVOICE, NONE
+    $payData->setFundingConstraints($constraints);
+
+    //Set the payer of Payson fees
+    $payData->setFeesPayer("PRIMARYRECEIVER");
+
+    // Set currency code
+    $payData->setCurrencyCode($currency_code);
+
+    // Set locale code
+    global $language;
+    $lang_name = $language->language;
+    if ($lang_name != 'se' || $lang_name != 'fi') {
+        $lang_name = 'EN';
+    }
+
+
+    $payData->setLocaleCode($lang_name);
+
+    // Set guarantee options
+    //$settings['guarantee']
+    $payData->setGuaranteeOffered('NO');
+    $payData->setTrackingId($order->order_number);
+
+
+    $payResponse = $api->pay($payData);
+
+    if ($payResponse->getResponseEnvelope()->wasSuccessful()) {
+        $d = 'Payson Gateway Payment Processing';
+        $form['#action'] = $api->getForwardPayUrl($payResponse);
+    } else {
+        $d = $payResponse->getResponseEnvelope()->getErrors();
+        watchdog('Payson_API', '<pre>' . print_r($d, TRUE) . '</pre>', null, $severity = WATCHDOG_INFO, $link = NULL);
+        return false;
+    }
+
+    //dd_safe($receivers, format_date(time(), 'custom', 'Y-m-d H:i:s'));
+
+    $form['submit'] = array(
+        '#type' => 'submit',
+        '#value' => t('Proceed to Payson'),
+    );
+
+
+
+    return $form;
+}
+
+/**
+ * Formats a price amount into a decimal value as expected by Payson API servers
+ *
+ * @param $amount
+ *   An integer price amount.
+ * @param $currency_code
+ *   The currency code of the price.
+ *
+ * @return
+ *   The decimal price amount as expected by Payson API
+ */
+function paypal_api_price_format($amount, $currency_code) {
+    $rounded_amount = commerce_currency_round($amount, commerce_currency_load($currency_code));
+    return number_format(commerce_currency_amount_to_decimal($rounded_amount, $currency_code), 2, '.', '');
+}
+
+/**
+ * Returns the IPN URL.
+ *
+ * @param $method_id
+ *   Optionally specify a payment method instance ID to include in the URL.
+ */
+function payson_api_ipn_url($instance_id = NULL) {
+    $parts = array(
+        'payson_api',
+        'ipn',
+    );
+
+    //watchdog('Payson_IPN', $instance_id, array(), WATCHDOG_WARNING); //payson_api_pay|commerce_payment_payson_api_pay
+
+    if (!empty($instance_id)) {
+        $parts[] = $instance_id;
+    }
+    //For testing 
+    //$url = "https://www.natureit.se/en/payson_api/ipn/payson_api_pay%7Ccommerce_payment_payson_api_pay?language=en";
+    $url = url(implode('/', $parts), array('absolute' => TRUE));
+    //watchdog('Payson_IPN_URL','<pre>'. print_r($url, TRUE) .'</pre>' , null, $severity = WATCHDOG_INFO, $link = NULL);
+
+    return $url;
+}
+
+/**
+ * Processes an incoming IPN.
+ *
+ * @param $payment_method
+ *   The payment method instance array that originally made the payment.
+ * @param $debug_ipn
+ *   Optionally specify an IPN array for debug purposes; if left empty, the IPN
+ *     be pulled from the $_POST. If an IPN is passed in, validation of the IPN
+ *     at Payson will be bypassed.
+ *
+ * @return
+ *   TRUE or FALSE indicating whether the IPN was successfully processed or not.
+ */
+function payson_api_process_ipn($payment_method = NULL) {
+    //watchdog('Payson_IPN_PM','<pre>'. print_r($payment_method, TRUE) .'</pre>' , null, $severity = WATCHDOG_INFO, $link = NULL);
+    // post gives an array which is never validated
+    $ipnData = file_get_contents('php://input');
+    // Exit now if the $_POST was empty.
+    if (empty($ipnData)) {
+        watchdog('Payson_IPN', 'IPN URL accessed with no POST data submitted.', array(), WATCHDOG_WARNING);
+        return FALSE;
+    }
+
+    if ($payment_method['settings']['server'] == 'liveAPI') {
+        require_once 'lib/paysonapi.php';
+        $your_user_id = $payment_method['settings']['agentid'];
+        $your_user_key = $payment_method['settings']['md5'];
+    } else {
+        require_once 'lib/paysonapiTest.php';
+        $your_user_id = $payment_method['settings']['test_agentid'];
+        $your_user_key = $payment_method['settings']['test_md5'];
+    }
+
+    if (isset($payment_method['settings']['agentid'])) {
+        $credentials = new PaysonCredentials($your_user_id, $your_user_key);
+        $api = new PaysonApi($credentials);
+    } else {
+        watchdog('Payson_IPN', 'IPN Authentication information not available.', array(), WATCHDOG_WARNING);
+    }
+    // Validate the request
+
+    $ipn_validated = $api->validate($ipnData);
+
+
+    if ($ipn_validated->isVerified()) {
+
+        $details = $ipn_validated->getPaymentDetails();
+        // watchdog('Payson_IPN', 'IPN Authentication is Verified.', array(), WATCHDOG_WARNING);
+
+        if ($details->getTrackingId()) {
+            $order = commerce_order_load($details->getTrackingId());
+        } else {
+            $order = FALSE;
+        }
+
+        if (!empty($payment_method)) {
+            $callback = $payment_method['base'] . '_ipn_process';
+            // If a processing function existed...
+            if (function_exists($callback)) {
+                // Skip saving if the function explicitly returns FALSE, meaning the IPN wasn't actually processed.
+                // POST contains ipn info in array
+                if ($callback($order, $payment_method, $details) !== FALSE) {
+                    // Save the processed IPN details. Not for now
+                    //payson_api_ipn_save($ipn);
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Validates the request after payment and make sure it's coming from Payson
+ *
+ * @param $order
+ *   The order object trying to be validated
+ *
+ * @param $payment_method
+ *   Information about the payment method
+ *
+ * @return
+ *   Boolean
+ */
+function payson_api_redirect_form_validate($order, $payment_method) {
+    $retData = file_get_contents('php://input');
+
+//   watchdog('Payson_IPN_GRP','<pre>'. print_r($_POST, TRUE) .'</pre>' , null, $severity = WATCHDOG_INFO, $link = NULL);
+//   watchdog('Payson_IPN_GRF','<pre>'. print_r($retData, TRUE) .'</pre>' , null, $severity = WATCHDOG_INFO, $link = NULL);
+
+    if (!empty($payment_method['settings']['ipn_logging']) && $payment_method['settings']['ipn_logging'] == 'full_ipn') {
+        watchdog('Payson_API', 'Customer returned from Payson with the following POST data:!ipn_data', array('!ipn_data' => $retData), WATCHDOG_NOTICE);
+    }
+
+    // This may be an unnecessary step, but if for some reason the user does end
+    // up returning at the success URL with a Failed payment, go back.
+    if (!empty($_POST['payment_status']) && $_POST['payment_status'] == 'Failed') {
+        return FALSE;
+    }
+}
+
+/**
+ * Payment method callback: process an IPN once it's been validated.
+ */
+function payson_api_ipn_process($order, $payment_method, $ipn) {
+
+    if (!$ipn->getPurchaseId()) {
+        return FALSE;
+    }
+
+    $transaction = commerce_payment_transaction_new('payson_api_pay', $order->order_id);
+    $transaction->instance_id = $payment_method['instance_id'];
+
+
+
+    $transaction->remote_id = $ipn->getPurchaseId();
+    $receivers = $ipn->getReceivers();
+    $transaction->amount = commerce_currency_decimal_to_amount($receivers[0]->getAmount(), $ipn->getCurrencyCode());
+    $transaction->currency_code = $ipn->getCurrencyCode();
+
+    // Set the transaction's statuses based on the IPN's payment_status.
+    $transaction->remote_status = $ipn->getStatus();
+
+
+    // If we didn't get an approval response code...
+    switch ($ipn->getStatus()) {
+        case 'CREATED':
+            $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+            $transaction->message = t("The payment request was received and has been created in Payson's system. Funds will be transferred once approval is received");
+            $order_statuses = ['pending'];
+            break;
+
+        case 'PENDING':
+            $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
+            $transaction->message = t("The sender has a pending transaction. A guarantee payment in progress has status pending. Please check guaranteeStatus for further details.");
+            $order_statuses = ['pending'];
+            break;
+
+        case 'PROCESSING':
+            $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
+            $transaction->message = t("The payment is in progress, check again later.");
+            $order_statuses = ['pending'];
+            break;
+
+        case 'COMPLETED':
+            $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+            $transaction->message = t("The sender's transaction has completed.");
+            $order_statuses = ['completed'];
+            break;
+
+        case 'CREDITED':
+            $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+            $transaction->message = t("The sender's transaction has been credited.");
+            $order_statuses = ['completed'];
+            break;
+
+        case 'ERROR':
+            $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+            $transaction->message = t("The payment has failed. This can happens if the payment was made from your customer’s bank account or the card had some post processing problem.");
+            $order_statuses = ['canceled'];
+            break;
+
+        case 'EXPIRED':
+            $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+            $transaction->message = t('A payment requiring approval was not executed within 3 hours.');
+            $order_statuses = ['canceled'];
+            break;
+
+        case 'REVERSALERROR':
+            $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+            $transaction->message = t('One or more transfers failed when attempting to reverse a payment.');
+            $order_statuses = ['canceled'];
+            break;
+
+        case 'ABORTED':
+            $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+            $transaction->message = t("The payment was aborted before any money were transferred.");
+            $order_statuses = ['canceled'];
+            break;
+        case 'CANCELED':
+            $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+            $transaction->message = t("The payment was aborted before any money were transferred.");
+            $order_statuses = ['canceled'];
+            break;        
+    }
+
+    // Save the transaction information.
+    //commerce_order_commerce_order_status_info($order_statuses);
+    commerce_order_status_update($order, $transaction->status, TRUE);
+    commerce_payment_transaction_save($transaction);
+
+    if ($ipn->getStatus() != 'COMPLETED') {
+        $msg = array('!order' => $order->order_number);
+        drupal_mail('payson_api', 'error_mail', $order->mail, language_default(), $msg);
+    }
+}
+
+function payson_api_mail($key, &$message, $params) {
+    switch ($key) {
+        case 'error_mail':
+            // note: data can be passed to this function in the $params array 
+            $message['subject'] = t('Payment did not validate');
+            $message['body'] = t('Please make sure your card or bank account is activated to be used online and have enough money. No card was issued for order: !order.', $params);
+            break;
+    }
+}
+
+function logIt($what) {
+    $content = print_r($what, true);
+    file_put_contents("c:\php\log\drupalCom.txt", date("H:i:s") . "\n" . $content, FILE_APPEND);
+}
